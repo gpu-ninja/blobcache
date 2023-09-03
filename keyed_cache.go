@@ -96,7 +96,7 @@ func NewKeyedCache(logger *zap.Logger, dir string, newHash func() hash.Hash, has
 }
 
 // Get looks up the ID in the cache and returns a reader if found.
-func (c *KeyedCache) Get(id ID) (file io.ReadCloser, entry KeyedEntry, err error) {
+func (c *KeyedCache) Get(id ID) (file io.ReadSeekCloser, entry KeyedEntry, err error) {
 	entry, err = c.getIndexEntry(id)
 	if err != nil {
 		return nil, KeyedEntry{}, err
