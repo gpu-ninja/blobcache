@@ -13,7 +13,7 @@
  * copyright notice, this list of conditions and the following disclaimer
  * in the documentation and/or other materials provided with the
  * distribution.
- *    * Neither the name of Google Inc. nor the names of its
+ *   * Neither the name of Google Inc. nor the names of its
  * contributors may be used to endorse or promote products derived from
  * this software without specific prior written permission.
  *
@@ -37,7 +37,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"io"
-	"os"
 	"testing"
 	"time"
 
@@ -47,7 +46,7 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
-func TestBlobCache(t *testing.T) {
+func TestCache(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 
 	blob := make([]byte, 1000000)
@@ -56,7 +55,7 @@ func TestBlobCache(t *testing.T) {
 
 	cacheDir := t.TempDir()
 
-	c, err := blobcache.Open(logger, cacheDir, sha256.New, sha256.Size, func() time.Time {
+	c, err := blobcache.NewCache(logger, cacheDir, sha256.New, sha256.Size, func() time.Time {
 		return time.Now().Add(-5 * time.Hour)
 	})
 	require.NoError(t, err)
@@ -71,14 +70,17 @@ func TestBlobCache(t *testing.T) {
 	_, _, err = c.Put(bytes.NewReader(blob))
 	require.NoError(t, err)
 
-	file, e, err := c.GetFile(id)
+	file, e, err := c.Get(id)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, file)
 	assert.Equal(t, int64(len(blob)), e.Size)
 	assert.NotZero(t, e.Time)
 
-	readBlob, err := os.ReadFile(file)
+	readBlob, err := io.ReadAll(file)
+	require.NoError(t, err)
+
+	err = file.Close()
 	require.NoError(t, err)
 
 	assert.Equal(t, blob, readBlob)
@@ -91,15 +93,18 @@ func TestBlobCache(t *testing.T) {
 	err = c.Trim(0)
 	require.NoError(t, err)
 
-	_, _, err = c.GetFile(id)
+	file, _, err = c.Get(id)
 	require.NoError(t, err)
 
-	c, err = blobcache.Open(logger, cacheDir, sha256.New, sha256.Size, nil)
+	err = file.Close()
+	require.NoError(t, err)
+
+	c, err = blobcache.NewCache(logger, cacheDir, sha256.New, sha256.Size, nil)
 	require.NoError(t, err)
 
 	err = c.Trim(1000)
 	require.NoError(t, err)
 
-	_, _, err = c.GetFile(id)
+	_, _, err = c.Get(id)
 	require.Error(t, err)
 }

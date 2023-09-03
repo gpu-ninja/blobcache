@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
+ * Copyright (c) 2009 The Go Authors. All rights reserved.
  * Copyright (c) 2023 Damian Peckett <damian@pecke.tt>.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -12,7 +13,7 @@
  * copyright notice, this list of conditions and the following disclaimer
  * in the documentation and/or other materials provided with the
  * distribution.
- *    * Neither the name of Google Inc. nor the names of its
+ *   * Neither the name of Google Inc. nor the names of its
  * contributors may be used to endorse or promote products derived from
  * this software without specific prior written permission.
  *
@@ -29,38 +30,85 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-package index_test
+package blobcache_test
 
 import (
-	"path/filepath"
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"io"
 	"testing"
+	"time"
 
-	"github.com/gpu-ninja/blobcache/index"
+	"github.com/gpu-ninja/blobcache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
 )
 
-func TestIndex(t *testing.T) {
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "index.db")
+func TestKeyedCache(t *testing.T) {
+	logger := zaptest.NewLogger(t)
 
-	idx, err := index.Open(indexPath)
+	blob := make([]byte, 1000000)
+	_, err := io.ReadFull(rand.Reader, blob)
 	require.NoError(t, err)
 
-	key := []byte("key")
-	value := []byte("value")
+	cacheDir := t.TempDir()
 
-	err = idx.Put(key, value)
+	c, err := blobcache.NewKeyedCache(logger, cacheDir, sha256.New, sha256.Size, func() time.Time {
+		return time.Now().Add(-5 * time.Hour)
+	})
 	require.NoError(t, err)
 
-	got, err := idx.Get(key)
-	require.NoError(t, err)
-	assert.Equal(t, value, got)
-
-	err = idx.Delete(key)
+	id := make([]byte, sha256.Size)
+	_, err = io.ReadFull(rand.Reader, id)
 	require.NoError(t, err)
 
-	got, err = idx.Get(key)
+	outputID, size, err := c.Put(id, bytes.NewReader(blob))
 	require.NoError(t, err)
-	assert.Nil(t, got)
+
+	assert.Equal(t, len(outputID), sha256.Size)
+	assert.Equal(t, int64(len(blob)), size)
+
+	// Should be a no-op.
+	_, _, err = c.Put(id, bytes.NewReader(blob))
+	require.NoError(t, err)
+
+	file, e, err := c.Get(id)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, file)
+	assert.Equal(t, int64(len(blob)), e.Size)
+	assert.NotZero(t, e.Time)
+
+	readBlob, err := io.ReadAll(file)
+	require.NoError(t, err)
+
+	err = file.Close()
+	require.NoError(t, err)
+
+	assert.Equal(t, blob, readBlob)
+
+	totalSize, err := c.Size()
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(len(blob)), totalSize)
+
+	err = c.Trim(0)
+	require.NoError(t, err)
+
+	file, _, err = c.Get(id)
+	require.NoError(t, err)
+
+	err = file.Close()
+	require.NoError(t, err)
+
+	c, err = blobcache.NewKeyedCache(logger, cacheDir, sha256.New, sha256.Size, nil)
+	require.NoError(t, err)
+
+	err = c.Trim(1000)
+	require.NoError(t, err)
+
+	_, _, err = c.Get(id)
+	require.Error(t, err)
 }

@@ -50,22 +50,14 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	// How often to update the file mtime on a cache entry.
-	mtimeInterval = 1 * time.Hour
-	// How long to keep cache entries before trimming.
-	trimLimit = 5 * 24 * time.Hour
-)
-
-type ID []byte
-
-type Entry struct {
-	Size int64
-	Time time.Time
+type KeyedEntry struct {
+	OutputID ID
+	Size     int64
+	Time     time.Time
 }
 
-// Cache is a cache that stores blobs by a hash of their contents.
-type Cache struct {
+// KeyedCache is a cache that stores blobs by a key.
+type KeyedCache struct {
 	logger   *zap.Logger
 	dir      string
 	newHash  func() hash.Hash
@@ -73,18 +65,7 @@ type Cache struct {
 	now      func() time.Time // For testing.
 }
 
-// NewCache opens and returns the cache in the given directory.
-//
-// It is safe for multiple processes on a single machine to use the
-// same cache directory in a local file system simultaneously.
-// They will coordinate using operating system file locks and may
-// duplicate effort but will not corrupt the cache.
-//
-// However, it is NOT safe for multiple processes on different machines
-// to share a cache directory (for example, if the directory were stored
-// in a network file system). File locking is notoriously unreliable in
-// network file systems and may not suffice to protect the cache.
-func NewCache(logger *zap.Logger, dir string, newHash func() hash.Hash, hashSize int64, now func() time.Time) (*Cache, error) {
+func NewKeyedCache(logger *zap.Logger, dir string, newHash func() hash.Hash, hashSize int64, now func() time.Time) (*KeyedCache, error) {
 	fi, err := os.Stat(dir)
 	if err != nil {
 		return nil, err
@@ -105,7 +86,7 @@ func NewCache(logger *zap.Logger, dir string, newHash func() hash.Hash, hashSize
 		now = time.Now
 	}
 
-	return &Cache{
+	return &KeyedCache{
 		logger:   logger,
 		dir:      dir,
 		newHash:  newHash,
@@ -115,45 +96,45 @@ func NewCache(logger *zap.Logger, dir string, newHash func() hash.Hash, hashSize
 }
 
 // Get looks up the ID in the cache and returns a reader if found.
-func (c *Cache) Get(id ID) (file io.ReadCloser, entry Entry, err error) {
+func (c *KeyedCache) Get(id ID) (file io.ReadCloser, entry KeyedEntry, err error) {
 	entry, err = c.getIndexEntry(id)
 	if err != nil {
-		return nil, Entry{}, err
+		return nil, KeyedEntry{}, err
 	}
 
 	if err := c.used(c.fileName(id, "a")); err != nil {
-		return nil, Entry{}, err
+		return nil, KeyedEntry{}, err
 	}
 
-	path, err := c.dataFile(id)
+	path, err := c.outputFile(entry.OutputID)
 	if err != nil {
-		return nil, Entry{}, err
+		return nil, KeyedEntry{}, err
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, Entry{}, err
+		return nil, KeyedEntry{}, err
 	}
 
 	if info.Size() != entry.Size {
-		return nil, Entry{}, &os.PathError{Op: "stat", Path: path, Err: errors.New("file incomplete")}
+		return nil, KeyedEntry{}, &os.PathError{Op: "stat", Path: path, Err: errors.New("file incomplete")}
 	}
 
 	file, err = os.Open(path)
 	if err != nil {
-		return nil, Entry{}, err
+		return nil, KeyedEntry{}, err
 	}
 
 	return file, entry, nil
 }
 
-func (c *Cache) getIndexEntry(id ID) (Entry, error) {
-	// entry file is "v1 <hex id> <decimal size space-padded to 20 bytes> <unixnano space-padded to 20 bytes>\n"
+func (c *KeyedCache) getIndexEntry(id ID) (KeyedEntry, error) {
+	// action entry file is "v1 <hex id> <hex out> <decimal size space-padded to 20 bytes> <unixnano space-padded to 20 bytes>\n"
 	hexSize := int(c.hashSize * 2)
-	entrySize := 2 + 1 + hexSize + 1 + 20 + 1 + 20 + 1
+	entrySize := 2 + 1 + hexSize + 1 + hexSize + 1 + 20 + 1 + 20 + 1
 
-	missing := func(reason error) (Entry, error) {
-		return Entry{}, &os.PathError{Op: "get", Path: hex.EncodeToString(id),
+	missing := func(reason error) (KeyedEntry, error) {
+		return KeyedEntry{}, &os.PathError{Op: "get", Path: hex.EncodeToString(id),
 			Err: fmt.Errorf("%v: %w", reason, os.ErrNotExist)}
 	}
 	f, err := os.Open(c.fileName(id, "a"))
@@ -172,17 +153,21 @@ func (c *Cache) getIndexEntry(id ID) (Entry, error) {
 	} else if n < entrySize {
 		return missing(errors.New("entry file incomplete"))
 	}
-	if entry[0] != 'v' || entry[1] != '1' || entry[2] != ' ' || entry[3+hexSize] != ' ' || entry[3+hexSize+1+20] != ' ' || entry[entrySize-1] != '\n' {
+	if entry[0] != 'v' || entry[1] != '1' || entry[2] != ' ' || entry[3+hexSize] != ' ' || entry[3+hexSize+1+hexSize] != ' ' || entry[3+hexSize+1+hexSize+1+20] != ' ' || entry[entrySize-1] != '\n' {
 		return missing(errors.New("invalid header"))
 	}
 	eid, entry := entry[3:3+hexSize], entry[3+hexSize:]
+	eout, entry := entry[1:1+hexSize], entry[1+hexSize:]
 	esize, entry := entry[1:1+20], entry[1+20:]
-	etime, _ := entry[1:1+20], entry[1+20:]
-	buf := make(ID, c.hashSize)
-	if _, err := hex.Decode(buf[:], eid); err != nil {
+	etime := entry[1 : 1+20]
+	buf := make([]byte, c.hashSize)
+	if _, err := hex.Decode(buf, eid); err != nil {
 		return missing(fmt.Errorf("decoding ID: %v", err))
 	} else if !bytes.Equal(buf, id) {
 		return missing(errors.New("mismatched ID"))
+	}
+	if _, err := hex.Decode(buf, eout); err != nil {
+		return missing(fmt.Errorf("decoding output ID: %v", err))
 	}
 	i := 0
 	for i < len(esize) && esize[i] == ' ' {
@@ -205,40 +190,41 @@ func (c *Cache) getIndexEntry(id ID) (Entry, error) {
 		return missing(errors.New("negative timestamp"))
 	}
 
-	return Entry{
-		Size: size,
-		Time: time.Unix(0, tm),
+	return KeyedEntry{
+		OutputID: buf,
+		Size:     size,
+		Time:     time.Unix(0, tm),
 	}, nil
 }
 
-// Put stores the given file in the cache. It may read file twice.
-// The content of file must not change between the two passes.
-func (c *Cache) Put(file io.ReadSeeker) (ID, int64, error) {
+// Put stores the given output in the cache as the output for the action ID.
+// It may read file twice. The content of file must not change between the two passes.
+func (c *KeyedCache) Put(id ID, file io.ReadSeeker) (ID, int64, error) {
+	h := c.newHash()
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, 0, err
+		return ID{}, 0, err
 	}
 
-	h := c.newHash()
 	size, err := io.Copy(h, file)
 	if err != nil {
-		return nil, 0, err
+		return ID{}, 0, err
 	}
 
-	id := h.Sum(nil)
+	out := h.Sum(nil)
 
 	// Copy to cached output file (if not already present).
-	if err := c.copyFile(file, id, size); err != nil {
-		return id, size, err
+	if err := c.copyFile(file, out, size); err != nil {
+		return out, size, err
 	}
 
 	// Add to cache index.
-	return id, size, c.putIndexEntry(id, size)
+	return out, size, c.putIndexEntry(id, out, size)
 }
 
 // putIndexEntry adds an entry to the cache recording that executing the action
 // with the given id produces an output with the given output id (hash) and size.
-func (c *Cache) putIndexEntry(id ID, size int64) error {
-	entry := fmt.Sprintf("v1 %x %20d %20d\n", id, size, time.Now().UnixNano())
+func (c *KeyedCache) putIndexEntry(id ID, out ID, size int64) error {
+	entry := fmt.Sprintf("v1 %x %x %20d %20d\n", id, out, size, time.Now().UnixNano())
 	file := c.fileName(id, "a")
 
 	// Copy file to cache directory.
@@ -247,12 +233,14 @@ func (c *Cache) putIndexEntry(id ID, size int64) error {
 	if err != nil {
 		return err
 	}
+
 	_, err = f.WriteString(entry)
 	if err == nil {
 		// Truncate the file only *after* writing it.
-		// (This should be a no-op, but truncate just in case of previous corruption.)
+		// (This should be a no-op, but truncate just in case of previous corruptio
 		err = f.Truncate(int64(len(entry)))
 	}
+
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
@@ -265,7 +253,7 @@ func (c *Cache) putIndexEntry(id ID, size int64) error {
 }
 
 // Size returns the total size of the cache in bytes.
-func (c *Cache) Size() (int64, error) {
+func (c *KeyedCache) Size() (int64, error) {
 	var size int64
 	err := filepath.Walk(c.dir, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
@@ -296,7 +284,7 @@ func (c *Cache) Size() (int64, error) {
 }
 
 // Trim removes old cache entries that are likely not to be reused.
-func (c *Cache) Trim(maxBytes int64) error {
+func (c *KeyedCache) Trim(maxBytes int64) error {
 	const maxIterations = 20
 
 	maxAge := trimLimit
@@ -338,7 +326,7 @@ func (c *Cache) Trim(maxBytes int64) error {
 }
 
 // trimSubdir trims a single cache subdirectory.
-func (c *Cache) trimSubdir(subdir string, cutoff time.Time) error {
+func (c *KeyedCache) trimSubdir(subdir string, cutoff time.Time) error {
 	// Read all directory entries from subdir before removing
 	// any files, in case removing files invalidates the file offset
 	// in the directory scan. Also, ignore error from f.Readdirnames,
@@ -374,8 +362,8 @@ func (c *Cache) trimSubdir(subdir string, cutoff time.Time) error {
 
 // copyFile copies file into the cache, expecting it to have the given
 // output ID and size, if that file is not present already.
-func (c *Cache) copyFile(file io.ReadSeeker, id ID, size int64) error {
-	name := c.fileName(id, "d")
+func (c *KeyedCache) copyFile(file io.ReadSeeker, out ID, size int64) error {
+	name := c.fileName(out, "d")
 	info, err := os.Stat(name)
 	if err == nil && info.Size() == size {
 		// Check hash.
@@ -387,8 +375,9 @@ func (c *Cache) copyFile(file io.ReadSeeker, id ID, size int64) error {
 			if err := f.Close(); err != nil {
 				return err
 			}
-			id2 := h.Sum(nil)
-			if bytes.Equal(id, id2) {
+
+			out2 := h.Sum(nil)
+			if bytes.Equal(out, out2) {
 				return nil
 			}
 		}
@@ -405,6 +394,7 @@ func (c *Cache) copyFile(file io.ReadSeeker, id ID, size int64) error {
 		return err
 	}
 	defer f.Close()
+
 	if size == 0 {
 		// File now exists with correct size.
 		// Only one possible zero-length file, so contents are OK too.
@@ -417,12 +407,14 @@ func (c *Cache) copyFile(file io.ReadSeeker, id ID, size int64) error {
 	// before returning, to avoid leaving bad bytes in the file.
 
 	// Copy file to f, but also into h to double-check hash.
-	if _, err := file.Seek(0, 0); err != nil {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		_ = f.Truncate(0)
 		return err
 	}
+
 	h := c.newHash()
 	w := io.MultiWriter(f, h)
+
 	if _, err := io.CopyN(w, file, size-1); err != nil {
 		_ = f.Truncate(0)
 		return err
@@ -439,10 +431,9 @@ func (c *Cache) copyFile(file io.ReadSeeker, id ID, size int64) error {
 	_, _ = h.Write(buf)
 
 	sum := h.Sum(nil)
-
-	if !bytes.Equal(sum, id[:]) {
+	if !bytes.Equal(sum, out) {
 		_ = f.Truncate(0)
-		return fmt.Errorf("file content changed undercachet")
+		return fmt.Errorf("file content changed underfoot")
 	}
 
 	// Commit cache file entry.
@@ -461,20 +452,20 @@ func (c *Cache) copyFile(file io.ReadSeeker, id ID, size int64) error {
 	return os.Chtimes(name, c.now(), c.now()) // mainly for tests
 }
 
-// dataFile returns the name of the cache file storing data with the given ID.
-func (c *Cache) dataFile(id ID) (string, error) {
-	file := c.fileName(id, "d")
+// outputFile returns the name of the cache file storing output with the given ID.
+func (c *KeyedCache) outputFile(out ID) (string, error) {
+	file := c.fileName(out, "d")
 	return file, c.used(file)
 }
 
 // fileName returns the name of the file corresponding to the given id.
-func (c *Cache) fileName(id ID, key string) string {
+func (c *KeyedCache) fileName(id ID, key string) string {
 	return filepath.Join(c.dir, fmt.Sprintf("%02x", id[0]), fmt.Sprintf("%x", id)+"-"+key)
 }
 
 // used makes a best-effort attempt to update mtime on file,
 // so that mtime reflects cache access time.
-func (c *Cache) used(file string) error {
+func (c *KeyedCache) used(file string) error {
 	info, err := os.Stat(file)
 	if err == nil && c.now().Sub(info.ModTime()) < mtimeInterval {
 		return nil
