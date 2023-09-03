@@ -303,7 +303,7 @@ func (c *Cache) Trim(maxBytes int64) error {
 	now := c.now()
 
 	for i := 0; i < maxIterations; i++ {
-		c.logger.Info("Trimming cache", zap.Stringer("maxAge", maxAge))
+		c.logger.Debug("Trimming cache", zap.Stringer("maxAge", maxAge))
 
 		cutoff := now.Add(-maxAge)
 		for i := 0; i < 256; i++ {
@@ -323,7 +323,7 @@ func (c *Cache) Trim(maxBytes int64) error {
 			return err
 		}
 
-		c.logger.Info("Trimmed cache size",
+		c.logger.Debug("Trimmed cache size",
 			zap.String("size", units.BytesSize(float64(size))))
 
 		// If we're still over the size limit, trim more.
@@ -363,7 +363,7 @@ func (c *Cache) trimSubdir(subdir string, cutoff time.Time) error {
 		entry := filepath.Join(subdir, name)
 		info, err := os.Stat(entry)
 		if err == nil && info.ModTime().Before(cutoff) {
-			c.logger.Info("Removing old cache entry", zap.String("entry", entry))
+			c.logger.Debug("Removing old cache entry", zap.String("entry", entry))
 
 			os.Remove(entry)
 		}
