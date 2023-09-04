@@ -60,21 +60,19 @@ func TestKeyedCache(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	id := make([]byte, sha256.Size)
-	_, err = io.ReadFull(rand.Reader, id)
-	require.NoError(t, err)
+	key := "test-key"
 
-	outputID, size, err := c.Put(id, bytes.NewReader(blob))
+	outputID, size, err := c.Put(key, bytes.NewReader(blob))
 	require.NoError(t, err)
 
 	assert.Equal(t, len(outputID), sha256.Size)
 	assert.Equal(t, int64(len(blob)), size)
 
 	// Should be a no-op.
-	_, _, err = c.Put(id, bytes.NewReader(blob))
+	_, _, err = c.Put(key, bytes.NewReader(blob))
 	require.NoError(t, err)
 
-	file, e, err := c.Get(id)
+	file, e, err := c.Get(key)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, file)
@@ -97,7 +95,7 @@ func TestKeyedCache(t *testing.T) {
 	err = c.Trim(0)
 	require.NoError(t, err)
 
-	file, _, err = c.Get(id)
+	file, _, err = c.Get(key)
 	require.NoError(t, err)
 
 	err = file.Close()
@@ -109,6 +107,6 @@ func TestKeyedCache(t *testing.T) {
 	err = c.Trim(1000)
 	require.NoError(t, err)
 
-	_, _, err = c.Get(id)
+	_, _, err = c.Get(key)
 	require.Error(t, err)
 }

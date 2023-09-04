@@ -96,7 +96,16 @@ func NewKeyedCache(logger *zap.Logger, dir string, newHash func() hash.Hash, has
 }
 
 // Get looks up the ID in the cache and returns a reader if found.
-func (c *KeyedCache) Get(id ID) (file io.ReadSeekCloser, entry KeyedEntry, err error) {
+func (c *KeyedCache) Get(key string) (file io.ReadSeekCloser, entry KeyedEntry, err error) {
+	// Generate ID from the key.
+	h := c.newHash()
+
+	if _, err := io.WriteString(h, key); err != nil {
+		return nil, KeyedEntry{}, err
+	}
+
+	id := h.Sum(nil)
+
 	entry, err = c.getIndexEntry(id)
 	if err != nil {
 		return nil, KeyedEntry{}, err
@@ -199,7 +208,7 @@ func (c *KeyedCache) getIndexEntry(id ID) (KeyedEntry, error) {
 
 // Put stores the given output in the cache as the output for the action ID.
 // It may read file twice. The content of file must not change between the two passes.
-func (c *KeyedCache) Put(id ID, file io.ReadSeeker) (ID, int64, error) {
+func (c *KeyedCache) Put(key string, file io.ReadSeeker) (ID, int64, error) {
 	h := c.newHash()
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return ID{}, 0, err
@@ -216,6 +225,15 @@ func (c *KeyedCache) Put(id ID, file io.ReadSeeker) (ID, int64, error) {
 	if err := c.copyFile(file, out, size); err != nil {
 		return out, size, err
 	}
+
+	// Generate ID from the key.
+	h = c.newHash()
+
+	if _, err := io.WriteString(h, key); err != nil {
+		return out, size, err
+	}
+
+	id := h.Sum(nil)
 
 	// Add to cache index.
 	return out, size, c.putIndexEntry(id, out, size)
